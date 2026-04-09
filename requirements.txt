@@ -1,0 +1,8 @@
+moviepy
+ffmpeg-python
+demucs
+torchcodec
+openai-whisper
+edge-tts
+pydub
+tqdm

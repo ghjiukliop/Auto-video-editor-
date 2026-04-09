@@ -1,0 +1,20 @@
+# Chặn toàn bộ thư mục tạm và đầu ra
+temp/
+input_videos/
+output_videos/
+extracted/
+
+# Chặn môi trường ảo và thư viện
+.venv/
+venv/
+__pycache__/
+
+# Chặn các file media nặng
+*.wav
+*.mp4
+*.mp3
+*.zip
+
+# Chặn file hệ thống/IDE
+.vscode/
+.idea/
