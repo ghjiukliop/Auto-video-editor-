@@ -1,11 +1,14 @@
 from pathlib import Path
-
+import os
 import ffmpeg
 
-
 def _escape_subtitles_path(srt_path: Path) -> str:
-    normalized = srt_path.resolve().as_posix()
-    return normalized.replace(":", r"\:")
+
+    rel_path = os.path.relpath(srt_path, Path.cwd())
+    
+    safe_path = rel_path.replace("\\", "/")
+    
+    return safe_path
 
 
 def merge_video_with_audio_and_subtitles(

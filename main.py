@@ -60,7 +60,7 @@ def setup_logging() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch video AI voiceover pipeline.")
-    parser.add_argument("--lang", choices=["vi", "en", "auto"], default="auto")
+    parser.add_argument("--lang", choices=["vi", "en", "zh", "auto"], default="auto")
     parser.add_argument("--voice", default=config.TTS_VOICE)
     parser.add_argument("--model", default=config.WHISPER_MODEL)
     parser.add_argument(

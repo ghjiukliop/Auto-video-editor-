@@ -18,3 +18,6 @@ __pycache__/
 # Chặn file hệ thống/IDE
 .vscode/
 .idea/
+
+# key 
+Key/

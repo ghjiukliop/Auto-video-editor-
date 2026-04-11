@@ -6,13 +6,12 @@ from typing import List
 
 import edge_tts
 from pydub import AudioSegment
-
 from utils.audio_utils import SRTSegment, parse_srt
-
+from pydub.effects import speedup
 logger = logging.getLogger("video_pipeline")
 
 # Danh sách giọng đọc ổn định nhất cho tiếng Việt
-FALLBACK_VOICES = ("vi-VN-HoaiMyNeural")
+FALLBACK_VOICES = ["vi-VN-HoaiMyNeural"]
 
 async def _generate_tts_chunk(
     text: str,
@@ -55,11 +54,31 @@ def _render_chunk_sync(text: str, voice: str, rate: str, pitch: str, output_path
     if last_exc is not None:
         raise last_exc
 
+from pydub.effects import speedup
+
 def _normalize_chunk_duration(segment: AudioSegment, target_ms: int) -> AudioSegment:
-    if len(segment) > target_ms:
-        return segment[:target_ms]
-    if len(segment) < target_ms:
-        return segment + AudioSegment.silent(duration=target_ms - len(segment))
+    """Tự động điều chỉnh tốc độ để khớp với thời gian trong SRT mà không mất chữ"""
+    if target_ms <= 0:
+        return segment
+        
+    duration_ms = len(segment)
+    
+    if duration_ms > target_ms:
+        speed_factor = duration_ms / target_ms
+        
+        if speed_factor < 1.05:
+            return segment
+            
+        try:
+            safe_speed = min(speed_factor, 1.4)
+            return speedup(segment, playback_speed=safe_speed, chunk_size=50, crossfade=25)
+        except Exception as e:
+            logger.warning(f"Không thể speedup, buộc phải cắt ngắn: {e}")
+            return segment[:target_ms] 
+
+    if duration_ms < target_ms:
+        return segment + AudioSegment.silent(duration=target_ms - duration_ms)
+        
     return segment
 
 def build_ai_voice_from_srt(

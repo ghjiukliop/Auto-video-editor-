@@ -9,12 +9,12 @@ TEMP_FOLDER = BASE_DIR / "temp"
 
 # CPU: "medium" on long videos can take many hours with no UI feedback. "small" is a
 # practical default; override with: python main.py --model medium
-WHISPER_MODEL = "small"
+WHISPER_MODEL = "small" 
 TTS_VOICE = "vi-VN-HoaiMyNeural"
-TTS_RATE = "+0%"
+TTS_RATE = "+15%"   
 TTS_PITCH = "+0Hz"
 
-BGM_VOLUME = 0.5
+BGM_VOLUME = 0
 VOICE_VOLUME = 1.0
 
 DEMUC_MODEL = "htdemucs"
