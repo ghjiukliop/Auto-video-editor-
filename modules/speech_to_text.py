@@ -11,31 +11,49 @@ from tqdm import tqdm
 from utils.audio_utils import segments_to_srt
 from dotenv import load_dotenv
 
-
 # ÉP HỆ THỐNG DÙNG UTF-8
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PYTHONIOENCODING"] = "UTF-8"
 
 logger = logging.getLogger("video_pipeline")
-load_dotenv() # Tự động tìm và đọc file .env
+
+# Nạp Key từ file env cụ thể
+env_path = Path(__file__).parent.parent / "Key" / "allkey.env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# CẤU HÌNH GROQ
-MODEL_NAME = "llama-3.3-70b-versatile"
+
+# ĐỔI SANG MODEL 8B ĐỂ TRÁNH LỖI 429 (Dẫn đến việc bị trả về tiếng Trung)
+MODEL_NAME = "llama-3.1-8b-instant"
 
 def translate_with_retry(texts: list[str], max_retries=3) -> list[str]:
-    """Dịch có cơ chế thử lại nếu gặp lỗi Rate Limit hoặc Kết nối"""
+    """Dịch ép buộc Hán-Việt và chống sót chữ Hán"""
+    if not GROQ_API_KEY:
+        return texts
+
     url = "https://api.groq.com/openai/v1/chat/completions"
+    
+    # PROMPT ĐÃ ĐƯỢC NÂNG CẤP ĐỂ XỬ LÝ TÊN NHÂN VẬT
     prompt_content = (
-        "Bạn là chuyên gia dịch thuật phim. Hãy dịch các câu sau sang tiếng Việt.\n"
-        "YÊU CẦU: GIỮ NGUYÊN ĐỊNH DẠNG ID|Văn bản. Không thêm lời giải thích.\n"
+        "Bạn là chuyên gia dịch thuật phim Trung-Việt chuyên nghiệp.\n"
+        "NHIỆM VỤ: Dịch các câu thoại sau sang tiếng Việt tự nhiên.\n"
+        "YÊU CẦU BẮT BUỘC:\n"
+        "1. GIỮ NGUYÊN ĐỊNH DẠNG ID|Văn bản. Không thêm lời giải thích.\n"
+        "2. TUYỆT ĐỐI KHÔNG để lại chữ Hán trong kết quả. TẤT CẢ tên riêng (như 悠雨) PHẢI được phiên âm sang âm Hán-Việt (ví dụ: 悠雨 -> Du Vũ, 林 -> Lâm).\n"
+        "3. Nếu không dịch được, hãy cố gắng phiên âm Hán-Việt cho toàn bộ câu đó.\n"
     )
     prompt_content += "\n".join([f"{i}|{t}" for i, t in enumerate(texts)])
     
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt_content}],
+        "messages": [
+            {"role": "system", "content": "Bạn là máy dịch phim chuyên nghiệp, chỉ trả về kết quả dưới dạng ID|Văn bản."},
+            {"role": "user", "content": prompt_content}
+        ],
         "temperature": 0.1
     }
 
@@ -43,9 +61,9 @@ def translate_with_retry(texts: list[str], max_retries=3) -> list[str]:
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=45)
             
-            if response.status_code == 429: # Chạm giới hạn tốc độ
-                wait_time = (attempt + 1) * 10
-                logger.warning(f"Chạm giới hạn tốc độ. Đang đợi {wait_time}s để thử lại...")
+            if response.status_code == 429:
+                wait_time = (attempt + 1) * 20
+                logger.warning(f"Chạm giới hạn Groq. Đang nghỉ {wait_time}s...")
                 time.sleep(wait_time)
                 continue
                 
@@ -53,29 +71,21 @@ def translate_with_retry(texts: list[str], max_retries=3) -> list[str]:
                 data = response.json()
                 raw_text = data['choices'][0]['message']['content']
                 
-                # Parsing thông minh: Tìm tất cả các dòng có dạng 'số|chữ'
                 results = {}
                 lines = raw_text.strip().split("\n")
                 for line in lines:
                     match = re.search(r"(\d+)\s*\|\s*(.*)", line)
                     if match:
-                        idx = int(match.group(1))
-                        content = match.group(2).strip()
-                        results[idx] = content
+                        results[int(match.group(1))] = match.group(2).strip()
                 
-                # Kiểm tra xem có đủ câu không
-                final_output = [results.get(i, texts[i]) for i in range(len(texts))]
-                return final_output
+                return [results.get(i, texts[i]) for i in range(len(texts))]
             
-            else:
-                logger.error(f"Lỗi API {response.status_code}. Thử lại lần {attempt+1}...")
-                time.sleep(5)
-                
+            time.sleep(5)
         except Exception as e:
-            logger.warning(f"Lỗi kết nối: {str(e)[:50]}. Thử lại sau 5s...")
+            logger.warning(f"Lỗi kết nối dịch thuật: {str(e)[:50]}")
             time.sleep(5)
 
-    return texts # Sau 3 lần thất bại, trả về bản gốc để không treo app
+    return texts
 
 def transcribe_to_srt(
     audio_path: Path,
@@ -84,16 +94,19 @@ def transcribe_to_srt(
     lang: Literal["vi", "en", "zh", "auto"] = "auto",
 ) -> Path:
     import whisper
+    import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    logger.info(f"Loading Whisper model {model_name}")
+    logger.info(f"Loading Whisper model {model_name} on {device}")
     model = whisper.load_model(model_name, device=device)
-    result = model.transcribe(str(audio_path), language="zh" if lang == "zh" else None, verbose=False)
+    
+    # Bước 1: Whisper trích xuất tiếng Trung chuẩn
+    result = model.transcribe(str(audio_path), language="zh" if lang == "zh" or lang == "auto" else None, verbose=False)
     segments = result.get("segments", [])
     
     if segments:
-        logger.info(f"Bắt đầu dịch {len(segments)} câu. Đang dùng chế độ Chống Lỗi Chunk...")
-        batch_size = 20 # Giảm size batch để AI dịch chính xác hơn
+        logger.info(f"Bắt đầu dịch {len(segments)} câu sang tiếng Việt (Model: {MODEL_NAME})...")
+        batch_size = 25
         
         for i in tqdm(range(0, len(segments), batch_size), desc="Đang dịch"):
             batch = segments[i:i + batch_size]
@@ -103,16 +116,11 @@ def transcribe_to_srt(
             
             for j, translated_text in enumerate(translated_texts):
                 if j < len(batch):
-                    # Chống lỗi: Nếu AI trả về tiếng Trung, giữ nguyên để bước sau lọc tiếp
                     batch[j]["text"] = translated_text
             
-            # Nghỉ 4 giây giữa các batch để giữ cho API 'vui vẻ'
-            time.sleep(4)
+            # Nghỉ ngắn để lách luật API
+            time.sleep(1.5)
 
     srt_text = segments_to_srt(segments)
-    with open(output_srt_path, "w", encoding="utf-8-sig") as f:
-        f.write(srt_text)
-        
+    output_srt_path.write_text(srt_text, encoding="utf-8-sig")
     return output_srt_path
-
-import torch # Đảm bảo import torch ở cuối hoặc đầu file

@@ -1,64 +1,27 @@
+import subprocess
+import logging
 from pathlib import Path
-import os
-import ffmpeg
 
-def _escape_subtitles_path(srt_path: Path) -> str:
+logger = logging.getLogger("video_pipeline")
 
-    rel_path = os.path.relpath(srt_path, Path.cwd())
+def merge_video_with_audio_and_subtitles(input_video_path, bgm_path, ai_voice_path, subtitles_path, output_video_path, bgm_volume, voice_volume):
+    logger.info("--- Đang ghép Video bằng FFmpeg siêu tốc ---")
     
-    safe_path = rel_path.replace("\\", "/")
+    # Lệnh trộn Voice và BGM, sau đó ghép vào Video mà không cần render lại hình ảnh (copy)
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', str(input_video_path),
+        '-i', str(bgm_path),
+        '-i', str(ai_voice_path),
+        '-filter_complex', 
+        f'[1:a]volume={bgm_volume}[bgm];[2:a]volume={voice_volume}[voice];[bgm][voice]amix=inputs=2:duration=first[audio_out]',
+        '-map', '0:v:0',
+        '-map', '[audio_out]',
+        '-c:v', 'copy', # Copy video gốc, cực nhanh
+        '-c:a', 'aac',
+        '-shortest',
+        str(output_video_path)
+    ]
     
-    return safe_path
-
-
-def merge_video_with_audio_and_subtitles(
-    input_video_path: Path,
-    bgm_path: Path,
-    ai_voice_path: Path,
-    subtitles_path: Path,
-    output_video_path: Path,
-    bgm_volume: float,
-    voice_volume: float,
-) -> Path:
-    output_video_path.parent.mkdir(parents=True, exist_ok=True)
-
-    video_stream = ffmpeg.input(str(input_video_path))
-    bgm_stream = ffmpeg.input(str(bgm_path)).audio.filter("volume", bgm_volume)
-    voice_stream = ffmpeg.input(str(ai_voice_path)).audio.filter("volume", voice_volume)
-
-    mixed_audio = ffmpeg.filter(
-        [bgm_stream, voice_stream],
-        "amix",
-        inputs=2,
-        duration="longest",
-        normalize=0,
-    )
-    subtitled_video = video_stream.video.filter(
-        "subtitles",
-        _escape_subtitles_path(subtitles_path),
-        charenc="UTF-8",
-    )
-
-    try:
-        (
-            ffmpeg.output(
-                subtitled_video,
-                mixed_audio,
-                str(output_video_path),
-                vcodec="libx264",
-                acodec="aac",
-                audio_bitrate="192k",
-                movflags="+faststart",
-                shortest=None,
-            )
-            .overwrite_output()
-            .run(capture_stdout=True, capture_stderr=True)
-        )
-    except ffmpeg.Error as exc:
-        stderr_text = (
-            exc.stderr.decode("utf-8", errors="replace")
-            if isinstance(exc.stderr, (bytes, bytearray))
-            else str(exc.stderr)
-        )
-        raise RuntimeError(f"FFmpeg merge failed: {stderr_text}") from exc
-    return output_video_path
+    subprocess.run(cmd, check=True, capture_output=True)
+    logger.info(f"✅ Đã tạo xong video: {output_video_path}")
