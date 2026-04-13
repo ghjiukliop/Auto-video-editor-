@@ -180,9 +180,9 @@ def run_batch(videos: List[Path], args: argparse.Namespace) -> None:
         for video in tqdm(pending, desc="Processing"):
             video_name, ok, message = process_single_video(
                 str(video),
-                whisper_model=args.model,
-                lang=args.lang,
-                tts_voice=args.voice,
+                args.model,
+                args.lang,
+                args.voice,
             )
             if ok:
                 successes += 1
