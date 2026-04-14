@@ -44,17 +44,10 @@ except ImportError:
     logger.error("❌ Cần cài: pip install srt")
     sys.exit(1)
 
-# ollama was replaced by Google Translate for better translation quality
-# try:
-#     import ollama
-# except ImportError:
-#     logger.error("❌ Cần cài: pip install ollama")
-#     sys.exit(1)
-
 try:
-    from googletrans import Translator as GoogleTranslator
+    import ollama
 except ImportError:
-    logger.error("❌ Cần cài: pip install googletrans")
+    logger.error("❌ Cần cài: pip install ollama")
     sys.exit(1)
 
 try:
@@ -62,6 +55,14 @@ try:
     from pydub import AudioSegment
 except ImportError:
     logger.error("❌ Cần cài: pip install edge-tts pydub")
+    sys.exit(1)
+
+# Import config and modules
+try:
+    import config
+    from modules.srt_parser_optimized import load_srt, save_srt
+except ImportError as e:
+    logger.error(f"❌ Import lỗi: {e}")
     sys.exit(1)
 
 # ============================================================================
@@ -194,94 +195,419 @@ class SpeechToText:
 # ============================================================================
 
 class TranslatorWithVerification:
-    """Dịch + tự động kiểm tra (dùng Google Translate via googletrans)."""
+    """
+    Translator sử dụng Ollama với 3-Pass System:
+    Pass 1: Dịch thô (từ Trung sang Việt)
+    Pass 2: Xác minh (tìm tiếng Trung còn sót, dịch lại)
+    Pass 3: Refactor (tinh chỉnh xưng hô & ngữ điệu)
     
-    def __init__(self, max_passes: int = 2):
-        self.translator = GoogleTranslator()
-        self.max_passes = max_passes
+    Đặc điểm:
+    - Dịch từng câu một (Granular Translation)
+    - Atomic write - ghi file tức thì mỗi câu
+    - Custom system prompt cho Ollama
+    - Logging chi tiết & Exception handling tốt
+    """
+    
+    # System prompt chuyên dụng cho Ollama
+    SYSTEM_PROMPT = (
+        "Bạn là một chuyên gia lồng tiếng phim. "
+        "Hãy dịch câu sau từ tiếng Trung sang tiếng Việt sao cho "
+        "ngắn gọn, khớp khẩu hình và xưng hô tự nhiên. "
+        "Chỉ trả về bản dịch, không thêm ghi chú hay giải thích."
+    )
+    
+    REFACTOR_PROMPT = (
+        "Bạn là một chuyên gia lồng tiếng phim tiếng Việt. "
+        "Hãy tinh chỉnh lại toàn bộ file phụ đề sau sao cho: "
+        "1. Xưng hô tự nhiên (anh/em, tôi/ông...) phù hợp với bối cảnh phim. "
+        "2. Ngữ điệu sôi động và chân thực. "
+        "3. Giữ nguyên định dạng SRT (chỉ chỉnh sửa nội dung text). "
+        "Trả về file SRT đầy đủ."
+    )
+    
+    def __init__(self, max_passes: int = 3):
+        """
+        Khởi tạo translator Ollama.
+        
+        Args:
+            max_passes: Số lượng pass tối đa (mặc định 3: rough, verify, refactor)
+        """
+        # Lock luôn là 3 pass (đã xóa Pass 4)
+        self.max_passes = 3
+        self.ollama_model = config.OLLAMA_MODEL
+        self.ollama_host = config.OLLAMA_HOST
+        
+        logger.info(
+            f"🤖 Khởi tạo Ollama Translator (3-Pass): "
+            f"Model={self.ollama_model}, Host={self.ollama_host}"
+        )
     
     def translate(self, srt_path: Path, output_path: Path) -> Path:
-        """Dịch SRT với xác minh tự động - ghi file trực tiếp."""
-        logger.info(f"🌐 Dịch: {srt_path.name} (Google Translate)...")
+        """
+        Dịch SRT file với 3-Pass verification system.
         
-        # Copy từ input sang output nếu khác
+        Args:
+            srt_path: Đường dẫn file SRT gốc (tiếng Trung)
+            output_path: Đường dẫn file SRT dịch (tiếng Việt)
+        
+        Returns:
+            Path đến file đã dịch
+        """
+        logger.info(f"🌐 Dịch: {srt_path.name} (Ollama)...")
+        
+        # Setup output directory
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Copy file gốc sang output trước (để atomic write có state khởi đầu)
         if srt_path != output_path:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            import shutil
             shutil.copy2(srt_path, output_path)
+            logger.info(f"📋 Copy gốc → output: {output_path.name}")
         
-        pass_num = 0
-        while pass_num < self.max_passes:
-            pass_num += 1
-            logger.info(f"\n📍 PASS {pass_num}/{self.max_passes}")
-            
-            # Load SRT từ file (lấy state mới nhất)
-            with open(output_path, 'r', encoding='utf-8-sig') as f:
-                subtitles = list(srt.parse(f))
-            
-            # Tìm phụ đề cần dịch (chứa tiếng Trung)
-            todo = []
-            for i, sub in enumerate(subtitles):
-                if ChineseDetector.has_chinese(sub.content):
-                    todo.append((i, sub.content))
-            
-            if not todo:
-                logger.info(f"✅ XONG! Không còn tiếng Trung")
-                break
-            
-            logger.info(f"   Dịch {len(todo)} phụ đề ({len(subtitles)} tổng)...")
-            
-            # Dịch từng phụ đề và GHI NGAY vào file
-            translated_count = 0
-            for idx, (orig_idx, content) in enumerate(todo):
-                try:
-                    # Dịch ZH → VI (googletrans trả về object .text)
-                    result = self.translator.translate(content, src='zh-CN', dest='vi')
-                    translated_text = result.text
-                    
-                    # Update subtitle
-                    subtitles[orig_idx].content = translated_text
-                    translated_count += 1
-                    
-                    # Ghi file sau mỗi 10 phụ đề hoặc phụ đề cuối
-                    if (idx + 1) % 10 == 0 or idx + 1 == len(todo):
-                        self._save_subtitles_to_file(subtitles, output_path)
-                        logger.info(f"      ✓ {translated_count} phụ đề đã dịch và lưu (từ {todo[max(0, idx-9)][0]+1} tới {orig_idx+1})")
-                        translated_count = 0
-                
-                except Exception as e:
-                    logger.warning(f"   ⚠️  Phụ đề {orig_idx}: dịch lỗi - {str(e)[:50]}")
-            
-            logger.info(f"   ✓ Pass {pass_num} hoàn tất")
-            
-            # Quét lại file toàn bộ để kiểm tra tiếng Trung còn lại
-            remaining_chinese = self._scan_file_for_chinese(output_path)
-            if remaining_chinese == 0:
-                logger.info(f"✅ XONG! Quét toàn bộ file - không còn tiếng Trung")
-                break
-            else:
-                logger.info(f"⚠️  Vẫn còn {remaining_chinese} phụ đề có tiếng Trung - sẽ dịch lại")
+        # ===== PASS 1: DỊCH THÔ =====
+        logger.info("\n" + "="*70)
+        logger.info("📍 PASS 1/3: Dịch thô (từ Trung sang Việt)")
+        logger.info("="*70)
         
-        logger.info(f"✅ Dịch xong: {output_path.name}")
+        self._pass_1_rough_translation(srt_path, output_path)
+        
+        # ===== PASS 2: XÁC MINH =====
+        logger.info("\n" + "="*70)
+        logger.info("📍 PASS 2/3: Xác minh & dịch lại (ChineseDetector)")
+        logger.info("="*70)
+        
+        self._pass_2_verification(output_path)
+        
+        # ===== PASS 3: REFACTOR =====
+        logger.info("\n" + "="*70)
+        logger.info("📍 PASS 3/3: Tinh chỉnh toàn diện (chunk-based)")
+        logger.info("="*70)
+        
+        self._pass_3_refactor(output_path)
+        
+        logger.info(f"\n✅ Dịch HOÀN TẤT: {output_path.name}")
         return output_path
     
-    def _save_subtitles_to_file(self, subtitles: List, file_path: Path):
-        """Ghi danh sách subtitles vào file SRT."""
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(srt.compose(subtitles))
+    def _pass_1_rough_translation(self, srt_path: Path, output_path: Path) -> None:
+        """
+        Pass 1: Dịch thô từng câu một.
+        - Load file SRT
+        - Dịch từng subtitle với Ollama
+        - Ghi file tức thì (atomic write)
+        """
+        try:
+            subtitles = load_srt(srt_path)
+            logger.info(f"✅ Load {len(subtitles)} subtitle từ {srt_path.name}")
+            
+            translated_count = 0
+            failed_count = 0
+            
+            for idx, subtitle in enumerate(subtitles, start=1):
+                # Check if already has Chinese (skip if not)
+                if not ChineseDetector.has_chinese(subtitle.content):
+                    logger.debug(f"   #{idx} (Skip) Không có tiếng Trung")
+                    continue
+                
+                # Log dịch
+                logger.info(
+                    f"   [Dịch #{idx:03d}] Gốc: {subtitle.content[:60]}{'...' if len(subtitle.content) > 60 else ''}"
+                )
+                
+                try:
+                    # Dịch câu này
+                    translated_text = self._translate_single_sentence(subtitle.content)
+                    
+                    # Update subtitle
+                    subtitle.content = translated_text
+                    translated_count += 1
+                    
+                    # Log thành công
+                    logger.info(
+                        f"   [✓ #{idx:03d}] Dịch: {translated_text[:60]}{'...' if len(translated_text) > 60 else ''}"
+                    )
+                    
+                    # Ghi file tức thì (Atomic Write)
+                    save_srt(subtitles, output_path)
+                    
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(
+                        f"   [✗ #{idx:03d}] ❌ Lỗi dịch: {str(e)[:80]}"
+                    )
+                    # Giữ nguyên nội dung gốc nếu dịch lỗi
+                    save_srt(subtitles, output_path)
+            
+            logger.info(
+                f"\n✅ Pass 1 XONG: {translated_count} thành công, {failed_count} lỗi "
+                f"(tổng {len(subtitles)})"
+            )
+        
+        except Exception as e:
+            logger.error(f"❌ Pass 1 thất bại: {str(e)}")
+            raise
     
-    def _scan_file_for_chinese(self, file_path: Path) -> int:
-        """Quét lại file để đếm phụ đề còn có tiếng Trung."""
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            subtitles = list(srt.parse(f))
+    def _pass_2_verification(self, srt_path: Path) -> None:
+        """
+        Pass 2: Xác minh - quét lại file tìm tiếng Trung còn sót.
+        - Load file SRT
+        - Dùng ChineseDetector quét từng subtitle
+        - Nếu còn tiếng Trung, dịch lại
+        - Ghi file ngay
+        """
+        try:
+            subtitles = load_srt(srt_path)
+            
+            # Quét tìm tiếng Trung
+            remaining_indices = []
+            for idx, subtitle in enumerate(subtitles):
+                if ChineseDetector.has_chinese(subtitle.content):
+                    remaining_indices.append(idx)
+            
+            if not remaining_indices:
+                logger.info(f"✅ Không còn tiếng Trung (quét {len(subtitles)} subtitle)")
+                return
+            
+            logger.info(
+                f"⚠️  Phát hiện {len(remaining_indices)} subtitle còn tiếng Trung\n"
+                f"   Dịch lại các subtitle: {remaining_indices[:10]}{'...' if len(remaining_indices) > 10 else ''}"
+            )
+            
+            retranslated_count = 0
+            
+            for idx in remaining_indices:
+                subtitle = subtitles[idx]
+                chinese_count = ChineseDetector.count_chinese(subtitle.content)
+                
+                logger.info(
+                    f"   [Dịch lại #{idx+1:03d}] Gốc: {subtitle.content[:60]}{'...' if len(subtitle.content) > 60 else ''} "
+                    f"({chinese_count} ký tự Trung)"
+                )
+                
+                try:
+                    # Dịch lại
+                    translated_text = self._translate_single_sentence(subtitle.content)
+                    subtitle.content = translated_text
+                    retranslated_count += 1
+                    
+                    logger.info(
+                        f"   [✓ #{idx+1:03d}] Dịch lại: {translated_text[:60]}{'...' if len(translated_text) > 60 else ''}"
+                    )
+                    
+                    # Ghi file ngay
+                    save_srt(subtitles, srt_path)
+                
+                except Exception as e:
+                    logger.error(
+                        f"   [✗ #{idx+1:03d}] ❌ Lỗi dịch lại: {str(e)[:80]}"
+                    )
+                    save_srt(subtitles, srt_path)
+            
+            logger.info(
+                f"\n✅ Pass 2 XONG: {retranslated_count} subtitle dịch lại, "
+                f"{len(remaining_indices) - retranslated_count} lỗi"
+            )
         
-        count = 0
-        for sub in subtitles:
-            if ChineseDetector.has_chinese(sub.content):
-                count += 1
+        except Exception as e:
+            logger.error(f"❌ Pass 2 thất bại: {str(e)}")
+            # Không raise - chỉ log warning
+    
+    def _pass_3_refactor(self, srt_path: Path) -> None:
+        """
+        Pass 3: Tinh chỉnh toàn diện (chunk-based).
         
-        return count
+        Chiến lược: Xử lý chunk của 8 subtitle cùng lúc
+        - Ollama có context lớn → hiểu giới tính, xưng hô, bối cảnh
+        - Sửa: giới tính, xưung hô, lời thoại, mọi thứ
+        - Parse lại & ATOMIC WRITE
+        """
+        try:
+            subtitles = load_srt(srt_path)
+            logger.info(f"✅ Load {len(subtitles)} subtitle cho Pass 3")
+            
+            # Chunk size: 8 subtitle (cân bằng context & parse safety)
+            chunk_size = 8
+            refactored_count = 0
+            
+            # Lặp chunk
+            for chunk_idx in range(0, len(subtitles), chunk_size):
+                chunk = subtitles[chunk_idx:chunk_idx + chunk_size]
+                start_idx = chunk_idx + 1
+                end_idx = min(chunk_idx + chunk_size, len(subtitles))
+                
+                logger.info(
+                    f"   [Refactor chunk {start_idx}-{end_idx}/{len(subtitles)}] "
+                    f"({len(chunk)} subtitle)"
+                )
+                
+                try:
+                    # Tạo SRT text của chunk
+                    chunk_srt = self._subtitles_to_srt_text(chunk)
+                    
+                    # Refactor prompt cho chunk (comprehensive)
+                    refactor_chunk_prompt = (
+                        f"Bạn là chuyên gia lồng tiếng phim tiếng Việt. "
+                        f"Hãy tinh chỉnh toàn bộ phụ đề sau sao cho:\n"
+                        f"1. Giới tính & xưng hô nhất quán (anh/cô, ông/bà, tôi/ta...)\n"
+                        f"2. Bối cảnh & lời thoại phù hợp nhân vật\n"
+                        f"3. Ngữ điệu sôi động & chân thực\n"
+                        f"4. Tự nhiên như lồng tiếng chuyên nghiệp\n"
+                        f"5. Giữ nguyên định dạng SRT (timing không đổi)\n\n"
+                        f"Phụ đề:\n{chunk_srt}\n\n"
+                        f"Trả về phụ đề đã chỉnh sửa theo format SRT gốc."
+                    )
+                    
+                    # Gọi Ollama refactor chunk
+                    refactored_chunk_text = self._call_ollama(refactor_chunk_prompt)
+                    
+                    # Parse lại chunk từ kết quả
+                    refactored_chunk = self._parse_srt_from_text(refactored_chunk_text)
+                    
+                    # Kiểm tra: số subtitle có khớp không?
+                    if refactored_chunk and len(refactored_chunk) == len(chunk):
+                        # Thành công → update subtitles
+                        for i, refactored_sub in enumerate(refactored_chunk):
+                            original_content = chunk[i].content
+                            chunk[i].content = refactored_sub.content
+                            
+                            # Log nếu có thay đổi
+                            if original_content != refactored_sub.content:
+                                refactored_count += 1
+                                logger.debug(
+                                    f"      [#{chunk_idx + i + 1}] "
+                                    f"{original_content[:40]} → {refactored_sub.content[:40]}"
+                                )
+                        
+                        # ATOMIC WRITE: ghi file ngay
+                        save_srt(subtitles, srt_path)
+                        logger.info(f"      ✓ Chunk {start_idx}-{end_idx} refactor xong")
+                    
+                    else:
+                        # Parse lỗi → giữ nguyên chunk
+                        logger.warning(
+                            f"      ⚠️  Parse lỗi (được {len(refactored_chunk) if refactored_chunk else 0}, "
+                            f"expected {len(chunk)}) - giữ nguyên chunk"
+                        )
+                        save_srt(subtitles, srt_path)
+                
+                except Exception as e:
+                    logger.error(
+                        f"      ⚠️  Chunk {start_idx}-{end_idx} lỗi: {str(e)[:60]} - giữ nguyên"
+                    )
+                    save_srt(subtitles, srt_path)
+            
+            logger.info(f"✅ Pass 3 XONG: {refactored_count}/{len(subtitles)} subtitle refactored")
+        
+        except Exception as e:
+            logger.error(f"❌ Pass 3 lỗi: {str(e)}")
+            # Không raise - Pass 3 là optional
+    
+    def _translate_single_sentence(self, text: str) -> str:
+        """
+        Dịch một câu đơn lẻ dùng Ollama.
+        
+        Args:
+            text: Câu tiếng Trung cần dịch
+        
+        Returns:
+            Câu tiếng Việt dịch được
+        
+        Raises:
+            Exception: Nếu Ollama không phản hồi
+        """
+        try:
+            translated = self._call_ollama(text, system_prompt=self.SYSTEM_PROMPT)
+            # Xóa khoảng trắng thừa
+            return translated.strip()
+        
+        except Exception as e:
+            logger.debug(f"Ollama call lỗi: {e}")
+            raise
+    
+    def _call_ollama(
+        self,
+        prompt: str,
+        system_prompt: str = None,
+        timeout: int = 30
+    ) -> str:
+        """
+        Gọi Ollama API với prompt cho trước.
+        
+        Args:
+            prompt: Câu hỏi / prompt cho Ollama
+            system_prompt: System prompt tùy chỉnh
+            timeout: Timeout (giây)
+        
+        Returns:
+            Phản hồi từ Ollama
+        
+        Raises:
+            TimeoutError: Nếu timeout
+            Exception: Nếu Ollama không phản hồi
+        """
+        try:
+            # Chuẩn bị messages
+            messages = []
+            if system_prompt:
+                messages.append({
+                    "role": "system",
+                    "content": system_prompt
+                })
+            
+            messages.append({
+                "role": "user",
+                "content": prompt
+            })
+            
+            # Gọi Ollama
+            response = ollama.chat(
+                model=self.ollama_model,
+                messages=messages,
+                stream=False,
+                options={
+                    "temperature": 0.3,  # Thấp để translation chính xác
+                    "top_p": 0.9,
+                    "top_k": 40,
+                }
+            )
+            
+            # Extract message
+            if response and "message" in response:
+                return response["message"]["content"]
+            else:
+                raise Exception(f"Invalid Ollama response: {response}")
+        
+        except TimeoutError:
+            raise TimeoutError(f"Ollama timeout ({timeout}s)")
+        except Exception as e:
+            # Log chi tiết
+            logger.debug(f"Ollama API error: {type(e).__name__}: {e}")
+            raise
+    
+    def _subtitles_to_srt_text(self, subtitles: list) -> str:
+        """
+        Chuyển danh sách subtitle thành text SRT format.
+        """
+        lines = []
+        for subtitle in subtitles:
+            lines.append(str(subtitle.index))
+            lines.append(f"{subtitle.start_time} --> {subtitle.end_time}")
+            lines.append(subtitle.content)
+            lines.append("")
+        
+        return "\n".join(lines)
+    
+    def _parse_srt_from_text(self, srt_text: str) -> list:
+        """
+        Parse SRT text trở lại danh sách subtitle.
+        Dùng chính regex từ OptimizedSRTParser.
+        """
+        from modules.srt_parser_optimized import OptimizedSRTParser
+        
+        try:
+            subtitles = OptimizedSRTParser.parse_content(srt_text)
+            return subtitles
+        except Exception as e:
+            logger.debug(f"Parse SRT text lỗi: {e}")
+            return None
 
 
 # ============================================================================
