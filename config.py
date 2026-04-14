@@ -11,10 +11,18 @@ TEMP_FOLDER = BASE_DIR / "temp"
 # practical default; override with: python main.py --model medium
 WHISPER_MODEL = "small" 
 TTS_VOICE = "vi-VN-HoaiMyNeural"
-TTS_RATE = "+15%"   
+TTS_RATE = "0%"   
 TTS_PITCH = "+0Hz"
 
 BGM_VOLUME = 0
 VOICE_VOLUME = 1.0
 
 DEMUC_MODEL = "htdemucs"
+
+# ============================================================================
+# OLLAMA CONFIGURATION (Local LLM)
+# ============================================================================
+OLLAMA_MODEL = "qwen2.5:7b"  # Model to use (change to your preferred model)
+OLLAMA_HOST = "http://localhost:11434"  # Default Ollama host
+OLLAMA_BATCH_SIZE = 100  # Number of lines per batch (optimize for RAM/VRAM) - reduced from 500
+
