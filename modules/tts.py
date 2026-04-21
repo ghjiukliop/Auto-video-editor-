@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import edge_tts
 from pydub import AudioSegment
 from tqdm import tqdm
+import re
 
 from utils.audio_utils import SRTSegment, parse_srt
 
@@ -88,11 +89,41 @@ def _render_chunk_sync(
             logger.debug(f"📝 Render: {text[:40]}... (attempt {attempt}/{RETRY_COUNT})")
             
             # Gọi Edge TTS API
+            # Normalize rate/pitch for Edge TTS (Edge expects signed values like +0% / -10%)
+            def _normalize_rate(r: str) -> str:
+                if r is None:
+                    return "+0%"
+                s = str(r).strip()
+                if s == "":
+                    return "+0%"
+                # If already percent-form
+                if s.endswith('%'):
+                    return s if s[0] in '+-' else f"+{s}"
+                # If numeric like 0 or -10 or +5
+                if re.match(r'^[+-]?\d+(?:\.\d+)?$', s):
+                    return (s + '%') if s[0] in '+-' else f"+{s}%"
+                return s
+
+            def _normalize_pitch(p: str) -> str:
+                if p is None:
+                    return "+0Hz"
+                s = str(p).strip()
+                if s == "":
+                    return "+0Hz"
+                if s.endswith('Hz'):
+                    return s if s[0] in '+-' else f"+{s}"
+                if re.match(r'^[+-]?\d+(?:\.\d+)?$', s):
+                    return (s + 'Hz') if s[0] in '+-' else f"+{s}Hz"
+                return s
+
+            rate_norm = _normalize_rate(rate)
+            pitch_norm = _normalize_pitch(pitch)
+
             communicate = edge_tts.Communicate(
                 text=text,
                 voice=voice,
-                rate=rate,
-                pitch=pitch
+                rate=rate_norm,
+                pitch=pitch_norm
             )
             # Use asyncio.run() để chạy async function trong thread
             asyncio.run(communicate.save(str(output_path)))

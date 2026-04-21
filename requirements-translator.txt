@@ -1,5 +1,0 @@
-# Requirements cho SRT Translator Optimized
-google-generativeai>=0.7.0
-pysubs2>=1.1.1
-edge-tts>=6.1.8
-python-dotenv>=1.0.0

@@ -1,28 +1,38 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Configuration cho YouTube Automation Pipeline
+"""
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
+# Load .env file
+load_dotenv(Path(__file__).parent / "Key" / "allkey.env")
 
-BASE_DIR = Path(__file__).resolve().parent
+# ============ GEMINI CONFIG ============
+GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_BATCH_SIZE = 10
+GEMINI_TEMPERATURE = 0.7
+GEMINI_MAX_RETRIES = 3
 
-INPUT_FOLDER = BASE_DIR / "input_videos"
-OUTPUT_FOLDER = BASE_DIR / "output_videos"
-TEMP_FOLDER = BASE_DIR / "temp"
+# ============ FOLDER PATHS ============
+PROJECT_ROOT = Path(__file__).parent
+INPUT_VIDEO_DIR = PROJECT_ROOT / "input" / "VideoInput"
+INPUT_AUDIO_DIR = PROJECT_ROOT / "input" / "AudioInput"
+INPUT_SRT_DIR = PROJECT_ROOT / "input" / "SrtInput"
+OUTPUT_SRT_DIR = PROJECT_ROOT / "output" / "SrtOutput"
+OUTPUT_AUDIO_DIR = PROJECT_ROOT / "output" / "AudioOutput"
+OUTPUT_VIDEO_DIR = PROJECT_ROOT / "output_videos"
+TEMP_DIR = PROJECT_ROOT / "temp"
 
-# CPU: "medium" on long videos can take many hours with no UI feedback. "small" is a
-# practical default; override with: python main.py --model medium
-WHISPER_MODEL = "small" 
-TTS_VOICE = "vi-VN-HoaiMyNeural"
-TTS_RATE = "0%"   
-TTS_PITCH = "+0Hz"
+# ============ TTS CONFIG ============
+TTS_ENGINE = os.getenv("TTS_ENGINE", "gtts")  # gtts, google_cloud, pyttsx3
+TTS_LANGUAGE = "vi"  # Vietnamese
 
-BGM_VOLUME = 0
-VOICE_VOLUME = 1.0
+# ============ WHISPER CONFIG ============
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")  # tiny, base, small, medium, large
 
-DEMUC_MODEL = "htdemucs"
-
-# ============================================================================
-# OLLAMA CONFIGURATION (Local LLM)
-# ============================================================================
-OLLAMA_MODEL = "qwen2.5:7b"  # Model to use (change to your preferred model)
-OLLAMA_HOST = "http://localhost:11434"  # Default Ollama host
-OLLAMA_BATCH_SIZE = 100  # Number of lines per batch (optimize for RAM/VRAM) - reduced from 500
-
+# ============ DEBUG ============
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
